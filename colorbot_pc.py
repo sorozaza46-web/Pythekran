@@ -5,10 +5,10 @@ import random
 import cv2
 import numpy as np
 import win32api
-import mss  # Bettercam yerine bellek hatası vermeyen MSS kütüphanesi
+import mss
 
 # --- AYARLAR ---
-AIM_KEY = 0x56  # 'V' Tuşu (Virtual-Key Code)
+AIM_KEY = 0x56  # 'V' Tuşu
 
 LISTEN_IP = "0.0.0.0"
 LISTEN_PORT = 9999
@@ -67,7 +67,7 @@ def get_pc_local_ip():
 
 def main():
     pc_ip = get_pc_local_ip()
-    print(f"[*] PC TCP Sunucusu Başlatılıyor...")
+    print(f"[*] Bluetooth Uyumlu TCP Sunucusu Başlatılıyor...")
     print(f"[*] Mobil Uygulamaya Girilecek IP: {pc_ip}")
     print(f"[*] Mobil Uygulamaya Girilecek Port: {LISTEN_PORT}")
 
@@ -88,7 +88,6 @@ def main():
     center_x = base_fov // 2
     center_y = base_fov // 2
 
-    # Tarama bölgesi alan (Region of Interest)
     monitor = {
         "top": (screen_h - base_fov) // 2,
         "left": (screen_w - base_fov) // 2,
@@ -102,7 +101,6 @@ def main():
     target_detected_time = None
     REACTION_DELAY = random.uniform(0.12, 0.18)
 
-    # MSS Ekran Yakalama Başlatılıyor
     with mss.mss() as sct:
         try:
             while True:
@@ -113,11 +111,9 @@ def main():
                     time.sleep(0.005)
                     continue
 
-                # Ekrana doğrudan erişim (BGRA formatı)
                 sct_img = sct.grab(monitor)
                 frame = np.array(sct_img)
 
-                # BGRA -> BGR Dönüşümü
                 frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                 hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
                 mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
@@ -145,6 +141,7 @@ def main():
                     dy = max(-127, min(127, dy))
 
                     if dx != 0 or dy != 0:
+                        # Bluetooth arka planı için standart dize formatı: "MOUSE dx dy\n"
                         payload = f"MOUSE {dx} {dy}\n".encode('utf-8')
                         client_socket.sendall(payload)
                         time.sleep(random.uniform(0.0011, 0.0022))
