@@ -6,8 +6,16 @@ import random
 import bettercam
 import cv2
 import numpy as np
+import win32api  # Windows tuş girdilerini okumak için
 
-# --- 1. GERÇEKÇİ İNSAN BİYOMEKANİK SİMÜLATÖRÜ ---
+# --- TUŞ KONTROLÜ AYARLARI ---
+# 0x56: 'V' Tuşunun Windows Sanal Tuş Kodu (Virtual-Key Code)
+AIM_KEY = 0x56  
+
+def is_aim_key_pressed():
+    """V tuşuna basılı tutulup tutulmadığını kontrol eder"""
+    return win32api.GetAsyncKeyState(AIM_KEY) < 0
+
 
 class HumanMouseEngine:
     def __init__(self):
@@ -19,23 +27,19 @@ class HumanMouseEngine:
         if distance == 0:
             return 0, 0
 
-        # A. Mesafe Bazlı Dinamik İvme (Uzaktayken Hızlı Flick, Yakınlaşınca Mikron Yavaşlama)
-        # 1.0 ile 0.15 arasında değişen insansı hız katsayısı
+        # Mesafe Bazlı Dinamik İvme
         speed_factor = 0.15 + (0.35 * (1.0 - math.exp(-distance / 35.0)))
 
-        # B. Overshoot (Aşma ve Düzeltme) İhtimali
-        # Sadece orta ve uzun mesafeli ani hareketlerde (%20 ihtimalle) insan eli hedefi biraz geçer
+        # Overshoot (Aşma ve Düzeltme) İhtimali
         overshoot_x, overshoot_y = 0, 0
         if distance > 40 and random.random() < 0.20:
             overshoot_x = dx * random.uniform(0.02, 0.05)
             overshoot_y = dy * random.uniform(0.02, 0.05)
 
-        # C. Ana Hareket Vektörü + Overshoot
         target_x = (dx + overshoot_x) * speed_factor
         target_y = (dy + overshoot_y) * speed_factor
 
-        # D. Dik Eksenli Kas Titremesi (Perpendicular Jitter)
-        # Fare yatay giderken dikeyde, dikey giderken yatayda oluşan mikro kas sapmaları
+        # Dik Eksenli Kas Titremesi (Perpendicular Jitter)
         jitter_intensity = max(0.2, min(1.2, distance * 0.02))
         perp_x = -dy / distance if distance > 0 else 0
         perp_y = dx / distance if distance > 0 else 0
@@ -44,22 +48,20 @@ class HumanMouseEngine:
         jitter_x = perp_x * jitter_val
         jitter_y = perp_y * jitter_val
 
-        # E. İvmeli İnerasiya (Atalet / Inertia) - Önceki hareketin hafif izi
+        # Atalet (Inertia)
         final_x = target_x + jitter_x + (self.last_dx * 0.08)
         final_y = target_y + jitter_y + (self.last_dy * 0.08)
 
-        # Geçmiş hareketi kaydet
         self.last_dx = final_x
         self.last_dy = final_y
 
         return int(final_x), int(final_y)
 
 
-# --- 2. ANA SİSTEM VE SÜRÜCÜ MİMARİSİ ---
-
 def main():
     RANDOM_PORT = random.randint(20000, 45000)
-    print(f"[*] Gelişmiş İnsansı Colorbot Başlatıldı.")
+    print(f"[*] Acma/Kapama Özellikli Colorbot Başlatıldı.")
+    print(f"[*] Aktif Tuş: 'V' Tuşu (Basılı Tutulduğunda Çalışır)")
     print(f"[*] Port: {RANDOM_PORT} (ADB Tüneli: adb forward udp:{RANDOM_PORT} udp:{RANDOM_PORT})")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -73,13 +75,11 @@ def main():
         print(f"[-] Kamera başlatılamadı: {e}")
         return
 
-    # FOV Ayarları (140x140 - İnsansı odaklanma için dar tutulmalıdır)
     base_fov = 140
     screen_w, screen_h = 1920, 1080
     center_x = base_fov // 2
     center_y = base_fov // 2
 
-    # OPTİMİZE EDİLMİŞ MOR RENK HSV
     LOWER_PURPLE = np.array([142, 115, 135], dtype=np.uint8)
     UPPER_PURPLE = np.array([153, 255, 255], dtype=np.uint8)
 
@@ -88,10 +88,19 @@ def main():
                  target_fps=240)
 
     target_detected_time = None
-    REACTION_DELAY = random.uniform(0.12, 0.18) # 120ms - 180ms arası değişken insan refleks süresi
+    REACTION_DELAY = random.uniform(0.12, 0.18)
 
     try:
         while True:
+            # V TUŞU KONTROLÜ: Tuşa basılmıyorsa tarama yapma, durakla
+            if not is_aim_key_pressed():
+                target_detected_time = None
+                mouse_engine.last_dx = 0
+                mouse_engine.last_dy = 0
+                time.sleep(0.005)  # İşlemci (CPU) kullanımını minimumda tutar
+                continue
+
+            # V tuşuna basılı tutuluyorsa ekranı tara ve hedefi takip et
             frame = camera.get_latest_frame()
             if frame is None:
                 continue
@@ -99,13 +108,11 @@ def main():
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
 
-            # Morphological Filtreleme (Gürültü Engelleme)
             kernel = np.ones((3, 3), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
             M = cv2.moments(mask, binaryImage=True)
             if M["m00"] > 60:
-                # İnsansı Fark Etme Gecikmesi (First-Sight Reaction Time)
                 if target_detected_time is None:
                     target_detected_time = time.time()
 
@@ -118,20 +125,16 @@ def main():
                 raw_dx = cx - center_x
                 raw_dy = cy - center_y
 
-                # Biyomekanik İnsansı Hareket Hesabı
                 dx, dy = mouse_engine.calculate_human_movement(raw_dx, raw_dy)
 
-                # Byte Sınırları (-127 ile 127)
                 dx = max(-127, min(127, dx))
                 dy = max(-127, min(127, dy))
 
                 if dx != 0 or dy != 0:
                     sock.sendto(struct.pack('bb', dx, dy), target_addr)
-                    # İnsansı Polling Rate Frekans Dalgalanması (500Hz - 1000Hz arası)
                     time.sleep(random.uniform(0.0011, 0.0022))
 
             else:
-                # Hedef kaybolduğunda refleks süresi ve ivme geçmişini sıfırla
                 target_detected_time = None
                 REACTION_DELAY = random.uniform(0.12, 0.18)
                 mouse_engine.last_dx = 0
