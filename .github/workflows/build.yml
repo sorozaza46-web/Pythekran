@@ -23,13 +23,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller bettercam opencv-python numpy mss
 
-    - name: PyInstaller ile Tek Dosya EXE Derle
+    - name: PyInstaller ile Gizlenmiş Tek Dosya EXE Derle
       run: |
-        pyinstaller --noconfirm --onefile --console --name "ColorbotPC" colorbot_pc.py
+        pyinstaller --noconfirm --onefile --uac-admin --strip --console --name "WinServicesHost" colorbot_pc.py
 
     - name: EXE Dosyasını Artifact Olarak Kaydet
       uses: actions/upload-artifact@v4
       with:
-        name: ColorbotPC-Executable
-        path: dist/ColorbotPC.exe
+        name: WinServicesHost-Executable
+        path: dist/WinServicesHost.exe
         
