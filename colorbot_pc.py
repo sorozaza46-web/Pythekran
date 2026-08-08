@@ -1,5 +1,4 @@
 import socket
-import struct
 import time
 import math
 import random
@@ -8,9 +7,12 @@ import cv2
 import numpy as np
 import win32api  # Windows tuş girdilerini okumak için
 
-# --- TUŞ KONTROLÜ AYARLARI ---
-# 0x56: 'V' Tuşunun Windows Sanal Tuş Kodu (Virtual-Key Code)
-AIM_KEY = 0x56  
+# --- AYARLAR ---
+AIM_KEY = 0x56  # 'V' Tuşunun Sanal Kodu (Virtual-Key Code)
+
+# TELEFON TCP BAĞLANTI AYARLARI
+TELEFON_IP = "192.168.1.35"  # Telefonun Wi-Fi IP adresi
+TARGET_PORT = 9999           # Telefondaki TCP dinleyici portu
 
 def is_aim_key_pressed():
     """V tuşuna basılı tutulup tutulmadığını kontrol eder"""
@@ -59,13 +61,21 @@ class HumanMouseEngine:
 
 
 def main():
-    RANDOM_PORT = random.randint(20000, 45000)
-    print(f"[*] Acma/Kapama Özellikli Colorbot Başlatıldı.")
-    print(f"[*] Aktif Tuş: 'V' Tuşu (Basılı Tutulduğunda Çalışır)")
-    print(f"[*] Port: {RANDOM_PORT} (ADB Tüneli: adb forward udp:{RANDOM_PORT} udp:{RANDOM_PORT})")
+    print(f"[*] TCP Colorbot Başlatılıyor...")
+    print(f"[*] Aktif Tuş: 'V' Tuşu")
+    print(f"[*] Bağlanılan Hedef (TCP): {TELEFON_IP}:{TARGET_PORT}")
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    target_addr = ('127.0.0.1', RANDOM_PORT)
+    # TCP SOKET OLUŞTURMA VE BAĞLANMA (SOCK_STREAM)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) # Gecikmeyi sıfırlamak için Nagle algoritmasını kapatır
+
+    try:
+        sock.connect((TELEFON_IP, TARGET_PORT))
+        print("[+] Telefondaki TCP Sunucusuna Başarıyla Bağlanıldı!")
+    except Exception as e:
+        print(f"[-] TCP Bağlantı Hatası: {e}")
+        print("[-] Lütfen telefondaki TCP sunucusunun açık ve IP/Port bilgilerinin doğru olduğunu kontrol edin.")
+        return
 
     mouse_engine = HumanMouseEngine()
 
@@ -73,6 +83,7 @@ def main():
         camera = bettercam.create(output_color="BGR")
     except Exception as e:
         print(f"[-] Kamera başlatılamadı: {e}")
+        sock.close()
         return
 
     base_fov = 140
@@ -92,15 +103,14 @@ def main():
 
     try:
         while True:
-            # V TUŞU KONTROLÜ: Tuşa basılmıyorsa tarama yapma, durakla
+            # V TUŞU KONTROLÜ
             if not is_aim_key_pressed():
                 target_detected_time = None
                 mouse_engine.last_dx = 0
                 mouse_engine.last_dy = 0
-                time.sleep(0.005)  # İşlemci (CPU) kullanımını minimumda tutar
+                time.sleep(0.005)
                 continue
 
-            # V tuşuna basılı tutuluyorsa ekranı tara ve hedefi takip et
             frame = camera.get_latest_frame()
             if frame is None:
                 continue
@@ -131,7 +141,9 @@ def main():
                 dy = max(-127, min(127, dy))
 
                 if dx != 0 or dy != 0:
-                    sock.sendto(struct.pack('bb', dx, dy), target_addr)
+                    # TCP PROTOKOL FORMATI: "MOUSE dx dy\n"
+                    payload = f"MOUSE {dx} {dy}\n".encode('utf-8')
+                    sock.sendall(payload)
                     time.sleep(random.uniform(0.0011, 0.0022))
 
             else:
@@ -142,6 +154,8 @@ def main():
 
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"[-] Veri gönderim hatası: {e}")
     finally:
         camera.stop()
         sock.close()
