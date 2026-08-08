@@ -17,15 +17,16 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+        cache: 'pip'
 
     - name: Bağımlılıkları Yükle
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller bettercam opencv-python numpy mss pywin32
+        pip install pyinstaller mss opencv-python-headless numpy pywin32
 
-    - name: PyInstaller ile Gizlenmiş Tek Dosya EXE Derle
+    - name: PyInstaller ile Exe Derle
       run: |
-        pyinstaller --noconfirm --onefile --uac-admin --strip --console --name "WinServicesHost" colorbot_pc.py
+        pyinstaller --noconfirm --onefile --uac-admin --console --collect-all mss --name "WinServicesHost" colorbot_pc.py
 
     - name: EXE Dosyasını Artifact Olarak Kaydet
       uses: actions/upload-artifact@v4
