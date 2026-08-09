@@ -1,36 +1,36 @@
-name: Build Colorbot EXE
+name: Build Windows EXE (PyInstaller)
 
 on:
   push:
-    branches: [ "main", "master" ]
-  workflow_dispatch:
+    branches:
+      - main
+      - master
+  workflow_dispatch: # GitHub web arayüzünden manuel tetikleme butonu ekler
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-    - name: Repoyu Klonla
-      uses: actions/checkout@v4
+      - name: Repoyu Klonla
+        uses: actions/checkout@v4
 
-    - name: Python 3.11 Kur
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+      - name: Python Ortamını Kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Bağımlılıkları Yükle
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Gerekli Kütüphaneleri Yükle
+        run: |
+          python -m pip install --upgrade pip
+          pip install mss opencv-python numpy pywin32 pyinstaller
 
-    - name: PyInstaller ile Exe Derle
-      run: |
-        pyinstaller --noconfirm --onefile --uac-admin --console --collect-all mss --name "WinServicesHost" colorbot_pc.py
+      - name: PyInstaller ile EXE Oluştur
+        run: |
+          pyinstaller --onefile --noconsole pc_colorbot_bridge.py
 
-    - name: EXE Dosyasını Artifact Olarak Kaydet
-      uses: actions/upload-artifact@v4
-      with:
-        name: WinServicesHost-Executable
-        path: dist/WinServicesHost.exe
-        
+      - name: EXE Dosyasını Artifact Yaparak Yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: PC-Colorbot-Bridge-EXE
+          path: dist/pc_colorbot_bridge.exe
