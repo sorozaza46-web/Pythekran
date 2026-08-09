@@ -10,43 +10,37 @@ from mss import mss
 # AYARLAR (CONFIG)
 # ==========================================
 PORT = 9999                  # TCP Portu
-FOV_SIZE = 140               # Tarama Alanı (Sadece Crosshair etrafı)
-DEADZONE = 2                 # 2 piksel yakınlıktaysa hareketi kes (Titremeyi engeller)
+FOV_SIZE = 140               # Tarama Alanı
+DEADZONE = 3                 # Hedefe 3 piksel kala FREN YAP ve STOP et (Durmayı sağlar)
 
-KP = 0.18                    # Hassasiyet Çarpanı
-MAX_STEP = 6                 # Tek adımda atılabilecek MAKSİMUM piksel (Fırlamayı önler)
+KP = 0.20                    # Temel Hassasiyet
+MAX_STEP = 8                 # Uzak hedefler için maksimum adım
+MIN_STEP = 1                 # Yakın hedefler için yumuşak adım
 
 VK_V = 0x56                  # 'V' Tuşu Kodu
 
 # ==========================================
-# PURPLE / MOR HSV RENK ARALIĞI
+# HSV MOR RENK ARALIĞI
 # ==========================================
 LOWER_PURPLE = np.array([140, 110, 120], dtype=np.uint8)
 UPPER_PURPLE = np.array([160, 255, 255], dtype=np.uint8)
 
-# ==========================================
-# FONKSİYONLAR
-# ==========================================
-
 def get_screen_roi(sct, roi_box):
-    """Ekranın merkezindeki ROI alanını yakalar."""
     sct_img = sct.grab(roi_box)
     img = np.array(sct_img)
     return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
 def is_v_pressed():
-    """V tuşunun basılı olup olmadığını kontrol eder."""
     return (win32api.GetAsyncKeyState(VK_V) & 0x8000) != 0
 
 def find_best_target(img, center_x, center_y):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
     
-    # --- ALT KISMI MASKELER (Aşağı kaymayı engelleyen kritik adım) ---
+    # Alt %30'luk kısmı (silah/zemin) maskele
     h_roi, w_roi = mask.shape
-    mask[int(h_roi * 0.7):, :] = 0  # ROI'nin alt %30'unu (silah/zemin) yoksay
+    mask[int(h_roi * 0.7):, :] = 0
 
-    # Parazit temizleme
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     
@@ -60,14 +54,10 @@ def find_best_target(img, center_x, center_y):
 
     for contour in contours:
         area = cv2.contourArea(contour)
-        
-        # Çok küçük (parazit) ve çok büyük alanları ele
         if area < 30 or area > 1800:
             continue
             
         x, y, w, h = cv2.boundingRect(contour)
-        
-        # En-boy oranı filtresi
         aspect_ratio = float(h) / float(w) if w > 0 else 0
         if aspect_ratio < 0.6:
             continue
@@ -75,7 +65,6 @@ def find_best_target(img, center_x, center_y):
         M = cv2.moments(contour)
         if M["m00"] != 0:
             cx = int(M["m10"] / M["m00"])
-            # Hedefin üst kısmına (kafa seviyesine) odaklan
             cy = int(M["m01"] / M["m00"]) - int(h * 0.30)
             
             dist = (cx - center_x) ** 2 + (cy - center_y) ** 2
@@ -100,8 +89,6 @@ def main():
     server_socket.listen(1)
     
     print(f"[+] TCP Sunucu {PORT} portunda dinleniyor...")
-    print("[+] Telefonda IP ve Port girerek bağlanın.")
-    
     conn, addr = server_socket.accept()
     print(f"[+] Telefon bağlandı: {addr}")
 
@@ -111,7 +98,6 @@ def main():
     screen_center_x = monitor["width"] // 2
     screen_center_y = monitor["height"] // 2
     
-    # ROI kutusunu hafifçe yukarı konumlandır
     roi_box = {
         "top": screen_center_y - (FOV_SIZE // 2) - 10,
         "left": screen_center_x - (FOV_SIZE // 2),
@@ -122,9 +108,6 @@ def main():
     roi_center_x = FOV_SIZE // 2
     roi_center_y = (FOV_SIZE // 2) - 10
 
-    smoothed_dx = 0.0
-    smoothed_dy = 0.0
-
     try:
         while True:
             if is_v_pressed():
@@ -132,35 +115,41 @@ def main():
                 raw_dx, raw_dy = find_best_target(frame, roi_center_x, roi_center_y)
                 
                 if raw_dx is not None and raw_dy is not None:
-                    # Yumuşatma hesabı (Ani fırlamaları keser)
-                    smoothed_dx = (smoothed_dx * 0.3) + (raw_dx * 0.7)
-                    smoothed_dy = (smoothed_dy * 0.3) + (raw_dy * 0.7)
+                    dist = math.hypot(raw_dx, raw_dy)
 
-                    calc_dx = smoothed_dx if abs(smoothed_dx) > DEADZONE else 0
-                    calc_dy = smoothed_dy if abs(smoothed_dy) > DEADZONE else 0
-                        
-                    if calc_dx != 0 or calc_dy != 0:
-                        move_x = int(calc_dx * KP)
-                        move_y = int(calc_dy * KP)
+                    # --- DURMA NOKTASI (DEADZONE) ---
+                    # Hedefe 3 piksel veya daha yakınsak HAREKET ETMEYİ KES
+                    if dist <= DEADZONE:
+                        time.sleep(0.005)
+                        continue
 
-                        # Minimum hareket garantisi
-                        if move_x == 0 and calc_dx != 0: move_x = 1 if calc_dx > 0 else -1
-                        if move_y == 0 and calc_dy != 0: move_y = 1 if calc_dy > 0 else -1
+                    # --- DİNAMİK ADIM HESABI (YAVAŞLAMA BÖLGESİ) ---
+                    # Hedefe yaklaştıkça maksimum adımı düşür (Sollayıp geçmeyi engeller)
+                    current_max_step = MAX_STEP
+                    if dist < 15:
+                        current_max_step = 2
+                    elif dist < 30:
+                        current_max_step = 4
 
-                        # Sert Hız Limiti (Aşağı fırlamayı engeller)
-                        move_x = clamp(move_x, -MAX_STEP, MAX_STEP)
-                        move_y = clamp(move_y, -MAX_STEP, MAX_STEP)
+                    move_x = int(raw_dx * KP)
+                    move_y = int(raw_dy * KP)
 
-                        # Ağ Paketini Yolla
-                        payload = f"MOUSE {move_x} {move_y}\n"
-                        conn.sendall(payload.encode('utf-8'))
+                    # Sıfır olmayan hareketlerde minimum 1 piksel kaydır
+                    if move_x == 0 and raw_dx != 0: move_x = 1 if raw_dx > 0 else -1
+                    if move_y == 0 and raw_dy != 0: move_y = 1 if raw_dy > 0 else -1
 
-                        time.sleep(0.008)
+                    # Dinamik sınırı uygula
+                    move_x = clamp(move_x, -current_max_step, current_max_step)
+                    move_y = clamp(move_y, -current_max_step, current_max_step)
+
+                    # Veriyi yolla
+                    payload = f"MOUSE {move_x} {move_y}\n"
+                    conn.sendall(payload.encode('utf-8'))
+
+                    time.sleep(0.008)
                 else:
-                    smoothed_dx, smoothed_dy = 0.0, 0.0
                     time.sleep(0.005)
             else:
-                smoothed_dx, smoothed_dy = 0.0, 0.0
                 time.sleep(0.01)
 
     except (ConnectionResetError, BrokenPipeError):
