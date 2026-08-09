@@ -11,35 +11,36 @@ from mss import mss
 # SİSTEM VE AĞ AYARLARI
 # ==========================================
 PORT = 9999                  # TCP Portu
-FOV_SIZE = 130               # Odak alanı (Gereksiz uzak morlukları eler)
-DEADZONE = 2                 # 2 piksel içi kilitlenme alanı (Sıfır titreme)
+FOV_SIZE = 140               # Odak alanı genişliği
+DEADZONE = 2                 # Kilitlenme toleransı (Piksel)
 
 # ==========================================
-# İNSANSI HAREKET VE PID PARAMETRELERİ
+# YUMUŞATILMIŞ HAREKET AYARLARI
 # ==========================================
-KP = 0.16                    # Proportional (Orantısal Yaklaşma)
-KD = 0.05                    # Derivative (Hedefe yaklaşırken Frenleme)
-MAX_STEP = 7                 # Ani sıçrama üst limiti (Fırlamayı engeller)
+KP = 0.13                    # Temel takip katsayısı (Düşürüldü = Daha yumuşak)
+SMOOTH_FACTOR = 0.45         # İvme yumuşatma çarpanı (Yüksek = Daha yumuşak akış)
+MAX_STEP = 5                 # Tek seferde atılabilecek MAKSİMUM adım (Aşırı fırlamayı önler)
 
 VK_V = 0x56                  # 'V' Tuşu Kodu
 
 # ==========================================
-# HSV MOR RENK FİLTRESİ
+# GENİŞLETİLMİŞ VE HASSASLAŞTIRILMIŞ MOR RENK
 # ==========================================
-LOWER_PURPLE = np.array([140, 110, 120], dtype=np.uint8)
-UPPER_PURPLE = np.array([160, 255, 255], dtype=np.uint8)
+# Gölgedeki ve uzaklıktaki morları da yakalamak için Saturation/Value aralığı esnetildi
+LOWER_PURPLE = np.array([135, 80, 100], dtype=np.uint8)
+UPPER_PURPLE = np.array([165, 255, 255], dtype=np.uint8)
 
 # ==========================================
-# İNSANSI MOUSE MOTORU (HUMANIZER)
+# YUMUŞATILMIŞ FARE MOTORU
 # ==========================================
-class HumanizedMouseEngine:
+class SmoothMouseEngine:
     def __init__(self):
-        self.prev_dx = 0
-        self.prev_dy = 0
+        self.curr_vx = 0.0
+        self.curr_vy = 0.0
 
     def reset(self):
-        self.prev_dx = 0
-        self.prev_dy = 0
+        self.curr_vx = 0.0
+        self.curr_vy = 0.0
 
     def calculate_step(self, raw_dx, raw_dy):
         dist = math.hypot(raw_dx, raw_dy)
@@ -48,39 +49,28 @@ class HumanizedMouseEngine:
             self.reset()
             return 0, 0
 
-        # PID Frenleme Hesabı
-        p_x = raw_dx * KP
-        p_y = raw_dy * KP
-        
-        d_x = (raw_dx - self.prev_dx) * KD
-        d_y = (raw_dy - self.prev_dy) * KD
+        # Hedefe olan mesafeye göre orantısal hedef hız
+        target_vx = raw_dx * KP
+        target_vy = raw_dy * KP
 
-        calc_x = p_x + d_x
-        calc_y = p_y + d_y
+        # İvme Yumuşatma (Exponential Moving Average)
+        # Aniden fırlamak yerine hıza yumuşakça ulaşır
+        self.curr_vx = (self.curr_vx * SMOOTH_FACTOR) + (target_vx * (1.0 - SMOOTH_FACTOR))
+        self.curr_vy = (self.curr_vy * SMOOTH_FACTOR) + (target_vy * (1.0 - SMOOTH_FACTOR))
 
-        # İnsansı Mikro Kavis ve Titreme (Gereksiz düz çizgileri engeller)
-        if dist > 8:
-            jitter_x = random.uniform(-0.35, 0.35)
-            jitter_y = random.uniform(-0.35, 0.35)
-            calc_x += jitter_x
-            calc_y += jitter_y
+        # Yaklaşma Freni (Hedefe 10 piksel kala mikro adımlara geç)
+        limit = MAX_STEP
+        if dist < 10:
+            limit = 2
+        elif dist < 20:
+            limit = 3.5
 
-        # Dinamik Hız Sınırlayıcı (Yavaşlama Bölgesi)
-        current_max = MAX_STEP
-        if dist < 12:
-            current_max = 2
-        elif dist < 25:
-            current_max = 4
+        move_x = int(np.clip(self.curr_vx, -limit, limit))
+        move_y = int(np.clip(self.curr_vy, -limit, limit))
 
-        move_x = int(np.clip(calc_x, -current_max, current_max))
-        move_y = int(np.clip(calc_y, -current_max, current_max))
-
-        # Sıfır olmasını engelleyen minimum adım kontrolü
+        # Sıfıra takılmayı önleme
         if move_x == 0 and raw_dx != 0: move_x = 1 if raw_dx > 0 else -1
         if move_y == 0 and raw_dy != 0: move_y = 1 if raw_dy > 0 else -1
-
-        self.prev_dx = raw_dx
-        self.prev_dy = raw_dy
 
         return move_x, move_y
 
@@ -99,12 +89,14 @@ def find_best_target(img, center_x, center_y):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
     
-    # Alt %35'lik kısmı (Silah, eldiven, zemin morlukları) kesin olarak maskele
+    # Alt %30'luk kısmı (Silah, eldiven) maskele
     h_roi, w_roi = mask.shape
-    mask[int(h_roi * 0.65):, :] = 0
+    mask[int(h_roi * 0.70):, :] = 0
 
+    # Gürültü temizleme ve Mor hatları belirginleştirme
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.dilate(mask, kernel, iterations=1) # Mor pikselleri dolgunlaştırır
     
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -116,19 +108,21 @@ def find_best_target(img, center_x, center_y):
 
     for contour in contours:
         area = cv2.contourArea(contour)
-        if area < 30 or area > 1800:
+        if area < 20 or area > 2200: # Esnetilmiş piksel alanı
             continue
             
         x, y, w, h = cv2.boundingRect(contour)
         aspect_ratio = float(h) / float(w) if w > 0 else 0
-        if aspect_ratio < 0.6:
+        if aspect_ratio < 0.5:
             continue
 
         M = cv2.moments(contour)
         if M["m00"] != 0:
             cx = int(M["m10"] / M["m00"])
-            # Kafa hizasına kilitlenme offseti
-            cy = int(M["m01"] / M["m00"]) - int(h * 0.32)
+            
+            # Dinamik Offset: Yükseklik çok küçükse (uzak hedef) kafa offsetini azalt
+            head_offset = int(h * 0.25) if h > 20 else int(h * 0.15)
+            cy = int(M["m01"] / M["m00"]) - head_offset
             
             dist = (cx - center_x) ** 2 + (cy - center_y) ** 2
             if dist < closest_dist:
@@ -150,8 +144,6 @@ def main():
     server_socket.listen(1)
     
     print(f"[+] TCP Sunucu {PORT} portunda dinleniyor...")
-    print("[+] Telefonda IP ve Port girerek bağlanın.")
-    
     conn, addr = server_socket.accept()
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     print(f"[+] Telefon bağlandı: {addr}")
@@ -172,7 +164,7 @@ def main():
     roi_center_x = FOV_SIZE // 2
     roi_center_y = (FOV_SIZE // 2) - 10
 
-    engine = HumanizedMouseEngine()
+    engine = SmoothMouseEngine()
 
     try:
         while True:
@@ -186,8 +178,8 @@ def main():
                     if move_x != 0 or move_y != 0:
                         payload = f"MOUSE {move_x} {move_y}\n".encode('utf-8')
                         conn.sendall(payload)
-                        # İnsansı mikro-gecikme (Her karede rastgele milisaniyelik değişim)
-                        time.sleep(random.uniform(0.007, 0.009))
+                        # Akıcı ve yumuşak mikro gecikme
+                        time.sleep(random.uniform(0.008, 0.010))
                     else:
                         time.sleep(0.004)
                 else:
