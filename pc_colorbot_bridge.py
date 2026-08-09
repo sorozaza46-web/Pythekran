@@ -7,23 +7,22 @@ import win32api
 from mss import mss
 
 # ==========================================
-# GÜNCELLENMİŞ VE YUMUŞATILMIŞ AYARLAR
+# AYARLAR (CONFIG)
 # ==========================================
 PORT = 9999                  # TCP Portu
-FOV_SIZE = 160               # FOV küçültüldü: Yanlış hedeflere fırlamayı doğrudan engeller
-DEADZONE = 2                 # 2 piksel yakınlıktaysa hareketi kes (titremeyi engeller)
+FOV_SIZE = 140               # Tarama Alanı (Sadece Crosshair etrafı)
+DEADZONE = 2                 # 2 piksel yakınlıktaysa hareketi kes (Titremeyi engeller)
 
-# Hassasiyet Ayarları (Oyundaki sens yüksekse KP'yi düşürün, örn: 0.12)
-KP = 0.18                    # Hassasiyet Çarpanı (Daha pürüzsüz takip)
-MAX_STEP = 6                 # Tek seferde atılacak maksimum adım (Fırlamayı kesin olarak engeller)
+KP = 0.18                    # Hassasiyet Çarpanı
+MAX_STEP = 6                 # Tek adımda atılabilecek MAKSİMUM piksel (Fırlamayı önler)
 
 VK_V = 0x56                  # 'V' Tuşu Kodu
 
 # ==========================================
-# RENK ARALIĞI (Daha Saf Mor)
+# PURPLE / MOR HSV RENK ARALIĞI
 # ==========================================
-LOWER_PURPLE = np.array([140, 110, 120])
-UPPER_PURPLE = np.array([160, 255, 255])
+LOWER_PURPLE = np.array([140, 110, 120], dtype=np.uint8)
+UPPER_PURPLE = np.array([160, 255, 255], dtype=np.uint8)
 
 # ==========================================
 # FONKSİYONLAR
@@ -40,18 +39,16 @@ def is_v_pressed():
     return (win32api.GetAsyncKeyState(VK_V) & 0x8000) != 0
 
 def find_best_target(img, center_x, center_y):
-    """
-    Gelişmiş Görüntü İşleme:
-    - Arka plan parazitlerini temizler.
-    - Merkeze en yakın mor konturu tespit eder.
-    """
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
     
+    # --- ALT KISMI MASKELER (Aşağı kaymayı engelleyen kritik adım) ---
+    h_roi, w_roi = mask.shape
+    mask[int(h_roi * 0.7):, :] = 0  # ROI'nin alt %30'unu (silah/zemin) yoksay
+
     # Parazit temizleme
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.dilate(mask, kernel, iterations=1)
     
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -65,12 +62,12 @@ def find_best_target(img, center_x, center_y):
         area = cv2.contourArea(contour)
         
         # Çok küçük (parazit) ve çok büyük alanları ele
-        if area < 30 or area > 2000:
+        if area < 30 or area > 1800:
             continue
             
         x, y, w, h = cv2.boundingRect(contour)
         
-        # En-Boy Oranı Filtresi (Çok yayvan şekilleri ele)
+        # En-boy oranı filtresi
         aspect_ratio = float(h) / float(w) if w > 0 else 0
         if aspect_ratio < 0.6:
             continue
@@ -78,8 +75,8 @@ def find_best_target(img, center_x, center_y):
         M = cv2.moments(contour)
         if M["m00"] != 0:
             cx = int(M["m10"] / M["m00"])
-            # Hedefin biraz daha üstüne (kafa seviyesine) odaklanmak için cy ayarlaması
-            cy = int(M["m01"] / M["m00"]) - int(h * 0.15)
+            # Hedefin üst kısmına (kafa seviyesine) odaklan
+            cy = int(M["m01"] / M["m00"]) - int(h * 0.30)
             
             dist = (cx - center_x) ** 2 + (cy - center_y) ** 2
             if dist < closest_dist:
@@ -114,17 +111,17 @@ def main():
     screen_center_x = monitor["width"] // 2
     screen_center_y = monitor["height"] // 2
     
+    # ROI kutusunu hafifçe yukarı konumlandır
     roi_box = {
-        "top": screen_center_y - (FOV_SIZE // 2),
+        "top": screen_center_y - (FOV_SIZE // 2) - 10,
         "left": screen_center_x - (FOV_SIZE // 2),
         "width": FOV_SIZE,
         "height": FOV_SIZE
     }
     
     roi_center_x = FOV_SIZE // 2
-    roi_center_y = FOV_SIZE // 2
+    roi_center_y = (FOV_SIZE // 2) - 10
 
-    # Yumuşatma değişkenleri
     smoothed_dx = 0.0
     smoothed_dy = 0.0
 
@@ -135,24 +132,22 @@ def main():
                 raw_dx, raw_dy = find_best_target(frame, roi_center_x, roi_center_y)
                 
                 if raw_dx is not None and raw_dy is not None:
-                    # Exponential Moving Average (İvme Yumuşatma - Ani fırlamaları keser)
-                    smoothed_dx = (smoothed_dx * 0.4) + (raw_dx * 0.6)
-                    smoothed_dy = (smoothed_dy * 0.4) + (raw_dy * 0.6)
+                    # Yumuşatma hesabı (Ani fırlamaları keser)
+                    smoothed_dx = (smoothed_dx * 0.3) + (raw_dx * 0.7)
+                    smoothed_dy = (smoothed_dy * 0.3) + (raw_dy * 0.7)
 
-                    # Deadzone Kontrolü
                     calc_dx = smoothed_dx if abs(smoothed_dx) > DEADZONE else 0
                     calc_dy = smoothed_dy if abs(smoothed_dy) > DEADZONE else 0
                         
                     if calc_dx != 0 or calc_dy != 0:
-                        # Orantısal Adım Hesabı
                         move_x = int(calc_dx * KP)
                         move_y = int(calc_dy * KP)
 
-                        # En küçük hareket garantisi
+                        # Minimum hareket garantisi
                         if move_x == 0 and calc_dx != 0: move_x = 1 if calc_dx > 0 else -1
                         if move_y == 0 and calc_dy != 0: move_y = 1 if calc_dy > 0 else -1
 
-                        # Sert Hız Limiti (Sapan gibi fırlamayı engeller)
+                        # Sert Hız Limiti (Aşağı fırlamayı engeller)
                         move_x = clamp(move_x, -MAX_STEP, MAX_STEP)
                         move_y = clamp(move_y, -MAX_STEP, MAX_STEP)
 
