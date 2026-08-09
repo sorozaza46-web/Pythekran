@@ -15,11 +15,11 @@ FOV_SIZE = 130               # Odak alanı genişliği
 DEADZONE = 2                 # Kilitlenme toleransı (Piksel)
 
 # ==========================================
-# İNSANSI Gelişmiş AYARLAR
+# İNSANSI GELİŞMİŞ AYARLAR
 # ==========================================
-BASE_KP = 0.13               # Temel takip hızı
-SMOOTH_FACTOR = 0.65         # Temel yumuşatma çarpanı (0.60 - 0.75 ideal)
-MAX_STEP = 6                 # Ani atlamayı önleyen maksimum adım sınırı
+BASE_KP = 0.12               # Temel takip hızı (Daha doğal geçiş için hafif düşürüldü)
+SMOOTH_FACTOR = 0.68         # Yumuşatma çarpanı
+MAX_STEP = 5.5               # Ani sıçramaları önleyen maksimum adım sınırı
 
 VK_V = 0x56                  # 'V' Tuşu Kodu
 
@@ -30,20 +30,22 @@ LOWER_PURPLE = np.array([135, 80, 100], dtype=np.uint8)
 UPPER_PURPLE = np.array([165, 255, 255], dtype=np.uint8)
 
 # ==========================================
-# PRO HUMAN MOUSE ENGINE (SUB-PIXEL & BEZIER)
+# PRO HUMAN MOUSE ENGINE (ADVANCED BIOMECHANICS)
 # ==========================================
 class ProHumanMouseEngine:
     def __init__(self):
         self.curr_vx = 0.0
         self.curr_vy = 0.0
-        self.remainder_x = 0.0  # Ondalık kayıplarını önleyen sub-pixel belleği
+        self.remainder_x = 0.0  
         self.remainder_y = 0.0
+        self.reaction_delay_counter = 0
 
     def reset(self):
         self.curr_vx = 0.0
         self.curr_vy = 0.0
         self.remainder_x = 0.0
         self.remainder_y = 0.0
+        self.reaction_delay_counter = 0
 
     def calculate_step(self, raw_dx, raw_dy):
         dist = math.hypot(raw_dx, raw_dy)
@@ -52,41 +54,59 @@ class ProHumanMouseEngine:
             self.reset()
             return 0, 0
 
-        # Fitts Yasası: Uzaktayken hızlı, hedefe yaklaştıkça kas kontrolüyle yavaşlama
-        if dist > 40:
-            kp = BASE_KP * 1.25
-            smooth = SMOOTH_FACTOR * 0.75
-        elif dist > 15:
+        # 1. İnsansı İnsan Reaksiyon Gecikmesi (Kas İrkilmesi / Muscle Latency)
+        # Hedef ilk tespit edildiğinde 1-2 döngü çok hafif tepkisizlik simüle edilir
+        if self.curr_vx == 0 and self.curr_vy == 0:
+            if self.reaction_delay_counter < random.randint(1, 2):
+                self.reaction_delay_counter += 1
+                return 0, 0
+
+        # 2. Dinamik Fitts Yasası & S-Curve Hız Profili
+        if dist > 45:
+            kp = BASE_KP * 1.20
+            smooth = SMOOTH_FACTOR * 0.70
+        elif dist > 18:
             kp = BASE_KP
             smooth = SMOOTH_FACTOR
         else:
-            kp = BASE_KP * 0.65
-            smooth = SMOOTH_FACTOR * 1.20  # Hedef yakınında maksimum yumuşaklık
+            kp = BASE_KP * 0.55
+            smooth = SMOOTH_FACTOR * 1.30  # Yakın mesafe mikro düzeltme yumuşaklığı
 
         target_vx = raw_dx * kp
         target_vy = raw_dy * kp
 
-        # İki eksende bağımsız kavis (Bezier Curve simülasyonu)
-        curve_factor = random.uniform(0.92, 1.08)
-        self.curr_vx = (self.curr_vx * smooth) + (target_vx * (1.0 - smooth)) * curve_factor
-        self.curr_vy = (self.curr_vy * smooth) + (target_vy * (1.0 - smooth))
+        # 3. Asimetrik Eksensel Kavis & Bezier Eğrisi Simülasyonu
+        # İnsan eli X (yatay) ve Y (dikey) ekseninde aynı ivmeyle hareket edemez.
+        curve_factor_x = random.uniform(0.88, 1.12)
+        curve_factor_y = random.uniform(0.94, 1.06)
 
-        # İnsansı Mikro Sapma (Micro-Jitter)
-        if dist > 6 and random.random() < 0.20:
-            self.curr_vx += random.choice([-0.2, 0.2])
-            self.curr_vy += random.choice([-0.2, 0.2])
+        self.curr_vx = (self.curr_vx * smooth) + (target_vx * (1.0 - smooth)) * curve_factor_x
+        self.curr_vy = (self.curr_vy * smooth) + (target_vy * (1.0 - smooth)) * curve_factor_y
 
-        # Hız Sınırlama & Frenleme
+        # 4. Overshoot / Hedefi Geçip Düzeltme (Hızlı Sıçramalarda)
+        # Mesafe yüksekse %15 ihtimalle hedef biraz aşılır ve geri toplanır.
+        if dist > 30 and random.random() < 0.15:
+            self.curr_vx *= 1.08
+            self.curr_vy *= 1.08
+
+        # 5. Biyometrik Mikro Titreme (Physiological Jitter)
+        if dist > 5 and random.random() < 0.25:
+            jitter_x = random.uniform(-0.35, 0.35)
+            jitter_y = random.uniform(-0.35, 0.35)
+            self.curr_vx += jitter_x
+            self.curr_vy += jitter_y
+
+        # 6. Dinamik Hız Sınırlama (Frenleme)
         limit = MAX_STEP
-        if dist < 8:
-            limit = 1.6
-        elif dist < 18:
-            limit = 2.8
+        if dist < 6:
+            limit = 1.3
+        elif dist < 15:
+            limit = 2.4
 
         scaled_vx = np.clip(self.curr_vx, -limit, limit)
         scaled_vy = np.clip(self.curr_vy, -limit, limit)
 
-        # Sub-pixel Hesaplama (Küsürat biriktirme)
+        # 7. Sub-pixel Akümülatörü (Ondalık Hassasiyet Belleği)
         total_x = scaled_vx + self.remainder_x
         total_y = scaled_vy + self.remainder_y
 
@@ -96,7 +116,7 @@ class ProHumanMouseEngine:
         self.remainder_x = total_x - move_x
         self.remainder_y = total_y - move_y
 
-        # Minimum Adım Düzeltmesi
+        # Minimum Adım Düzeltmesi (Ölü noktaları aşma)
         if move_x == 0 and raw_dx != 0 and abs(raw_dx) > DEADZONE:
             move_x = 1 if raw_dx > 0 else -1
         if move_y == 0 and raw_dy != 0 and abs(raw_dy) > DEADZONE:
@@ -120,7 +140,8 @@ def find_best_target(img, center_x, center_y):
     mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
     
     h_roi, w_roi = mask.shape
-    mask[int(h_roi * 0.70):, :] = 0  # Gövdenin alt kısmını ele
+    # Alt kısmı daha agresif keserek odağı kafa ve boyun bölgesine topluyoruz
+    mask[int(h_roi * 0.62):, :] = 0  
 
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -148,9 +169,12 @@ def find_best_target(img, center_x, center_y):
         if M["m00"] != 0:
             cx = int(M["m10"] / M["m00"])
             
-            # Kafa hizalaması + Hafif dinamik offset (Sabit nokta kilidini kırar)
-            head_offset = int(h * 0.27) if h > 20 else int(h * 0.17)
-            head_offset += random.choice([-1, 0, 1])  # İnsansı mikro kafa oynaması
+            # --- YUKARI HİZALAMA VE İNSANSI RASTGELELİK ---
+            # h * 0.36 oranı ile hedef tam kafa hizasına taşındı.
+            head_offset = int(h * 0.36) if h > 20 else int(h * 0.24)
+            
+            # Sabit nokta kilitlenmesini bozmak için Gauss dağılımlı mikro sapma
+            head_offset += int(np.random.normal(0, 0.8))  
             
             cy = int(M["m01"] / M["m00"]) - head_offset
             
@@ -211,8 +235,13 @@ def main():
                             payload = f"MOUSE {move_x} {move_y}\n".encode('utf-8')
                             conn.sendall(payload)
                             
-                            # Değişken İnsansı Raporlama Sıklığı (Human Polling Fluctuations)
-                            time.sleep(random.uniform(0.006, 0.011))
+                            # İnsansı Zamanlama Dalgalanması (Variable Polling Frequency)
+                            # Sabit gecikmeler yerine insan el kaslarının tutarsızlığı simüle edilir.
+                            base_sleep = random.uniform(0.005, 0.010)
+                            if random.random() < 0.08:  # %8 ihtimalle anlık insansı duraklama (micro-pause)
+                                base_sleep += random.uniform(0.003, 0.007)
+                                
+                            time.sleep(base_sleep)
                         else:
                             time.sleep(0.003)
                     else:
