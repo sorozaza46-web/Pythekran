@@ -11,15 +11,15 @@ from mss import mss
 # SİSTEM VE AĞ AYARLARI
 # ==========================================
 PORT = 9999                  # TCP Portu
-FOV_SIZE = 140               # Odak alanı genişliği
+FOV_SIZE = 130               # Odak alanı genişliği
 DEADZONE = 2                 # Kilitlenme toleransı (Piksel)
 
 # ==========================================
-# YUMUŞATILMIŞ HAREKET AYARLARI
+# İNSANSI Gelişmiş AYARLAR
 # ==========================================
-KP = 0.12                    # Düşük katsayı = Ekstra yumuşak takip
-SMOOTH_FACTOR = 0.55         # İvme yumuşatma çarpanı (Artırıldı = Daha akıcı/insansı)
-MAX_STEP = 4                 # Tek seferde atılabilecek MAKSİMUM adım (Ani sıçramayı önler)
+BASE_KP = 0.13               # Temel takip hızı
+SMOOTH_FACTOR = 0.65         # Temel yumuşatma çarpanı (0.60 - 0.75 ideal)
+MAX_STEP = 6                 # Ani atlamayı önleyen maksimum adım sınırı
 
 VK_V = 0x56                  # 'V' Tuşu Kodu
 
@@ -30,16 +30,20 @@ LOWER_PURPLE = np.array([135, 80, 100], dtype=np.uint8)
 UPPER_PURPLE = np.array([165, 255, 255], dtype=np.uint8)
 
 # ==========================================
-# YUMUŞATILMIŞ FARE MOTORU
+# PRO HUMAN MOUSE ENGINE (SUB-PIXEL & BEZIER)
 # ==========================================
-class SmoothMouseEngine:
+class ProHumanMouseEngine:
     def __init__(self):
         self.curr_vx = 0.0
         self.curr_vy = 0.0
+        self.remainder_x = 0.0  # Ondalık kayıplarını önleyen sub-pixel belleği
+        self.remainder_y = 0.0
 
     def reset(self):
         self.curr_vx = 0.0
         self.curr_vy = 0.0
+        self.remainder_x = 0.0
+        self.remainder_y = 0.0
 
     def calculate_step(self, raw_dx, raw_dy):
         dist = math.hypot(raw_dx, raw_dy)
@@ -48,25 +52,55 @@ class SmoothMouseEngine:
             self.reset()
             return 0, 0
 
-        target_vx = raw_dx * KP
-        target_vy = raw_dy * KP
+        # Fitts Yasası: Uzaktayken hızlı, hedefe yaklaştıkça kas kontrolüyle yavaşlama
+        if dist > 40:
+            kp = BASE_KP * 1.25
+            smooth = SMOOTH_FACTOR * 0.75
+        elif dist > 15:
+            kp = BASE_KP
+            smooth = SMOOTH_FACTOR
+        else:
+            kp = BASE_KP * 0.65
+            smooth = SMOOTH_FACTOR * 1.20  # Hedef yakınında maksimum yumuşaklık
 
-        # Exponential Moving Average (İnsansı yumuşak ivme)
-        self.curr_vx = (self.curr_vx * SMOOTH_FACTOR) + (target_vx * (1.0 - SMOOTH_FACTOR))
-        self.curr_vy = (self.curr_vy * SMOOTH_FACTOR) + (target_vy * (1.0 - SMOOTH_FACTOR))
+        target_vx = raw_dx * kp
+        target_vy = raw_dy * kp
 
-        # Frenleme bölgesi
+        # İki eksende bağımsız kavis (Bezier Curve simülasyonu)
+        curve_factor = random.uniform(0.92, 1.08)
+        self.curr_vx = (self.curr_vx * smooth) + (target_vx * (1.0 - smooth)) * curve_factor
+        self.curr_vy = (self.curr_vy * smooth) + (target_vy * (1.0 - smooth))
+
+        # İnsansı Mikro Sapma (Micro-Jitter)
+        if dist > 6 and random.random() < 0.20:
+            self.curr_vx += random.choice([-0.2, 0.2])
+            self.curr_vy += random.choice([-0.2, 0.2])
+
+        # Hız Sınırlama & Frenleme
         limit = MAX_STEP
-        if dist < 10:
-            limit = 2.0
-        elif dist < 20:
-            limit = 3.0
+        if dist < 8:
+            limit = 1.6
+        elif dist < 18:
+            limit = 2.8
 
-        move_x = int(np.clip(self.curr_vx, -limit, limit))
-        move_y = int(np.clip(self.curr_vy, -limit, limit))
+        scaled_vx = np.clip(self.curr_vx, -limit, limit)
+        scaled_vy = np.clip(self.curr_vy, -limit, limit)
 
-        if move_x == 0 and raw_dx != 0: move_x = 1 if raw_dx > 0 else -1
-        if move_y == 0 and raw_dy != 0: move_y = 1 if raw_dy > 0 else -1
+        # Sub-pixel Hesaplama (Küsürat biriktirme)
+        total_x = scaled_vx + self.remainder_x
+        total_y = scaled_vy + self.remainder_y
+
+        move_x = int(math.trunc(total_x))
+        move_y = int(math.trunc(total_y))
+
+        self.remainder_x = total_x - move_x
+        self.remainder_y = total_y - move_y
+
+        # Minimum Adım Düzeltmesi
+        if move_x == 0 and raw_dx != 0 and abs(raw_dx) > DEADZONE:
+            move_x = 1 if raw_dx > 0 else -1
+        if move_y == 0 and raw_dy != 0 and abs(raw_dy) > DEADZONE:
+            move_y = 1 if raw_dy > 0 else -1
 
         return move_x, move_y
 
@@ -86,7 +120,7 @@ def find_best_target(img, center_x, center_y):
     mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
     
     h_roi, w_roi = mask.shape
-    mask[int(h_roi * 0.70):, :] = 0
+    mask[int(h_roi * 0.70):, :] = 0  # Gövdenin alt kısmını ele
 
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -113,7 +147,11 @@ def find_best_target(img, center_x, center_y):
         M = cv2.moments(contour)
         if M["m00"] != 0:
             cx = int(M["m10"] / M["m00"])
-            head_offset = int(h * 0.25) if h > 20 else int(h * 0.15)
+            
+            # Kafa hizalaması + Hafif dinamik offset (Sabit nokta kilidini kırar)
+            head_offset = int(h * 0.27) if h > 20 else int(h * 0.17)
+            head_offset += random.choice([-1, 0, 1])  # İnsansı mikro kafa oynaması
+            
             cy = int(M["m01"] / M["m00"]) - head_offset
             
             dist = (cx - center_x) ** 2 + (cy - center_y) ** 2
@@ -146,9 +184,8 @@ def main():
     roi_center_x = FOV_SIZE // 2
     roi_center_y = (FOV_SIZE // 2) - 10
 
-    engine = SmoothMouseEngine()
+    engine = ProHumanMouseEngine()
 
-    # ÇÖKMEYİ ÖNLEYEN SÜREKLİ DİNLEME DÖNGÜSÜ
     while True:
         try:
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -157,10 +194,10 @@ def main():
             server_socket.bind(('0.0.0.0', PORT))
             server_socket.listen(1)
             
-            print(f"\n[+] Sunucu hazır. {PORT} portunda bağlantı bekleniyor...")
+            print(f"\n[+] Sunucu aktif. Port: {PORT}")
             conn, addr = server_socket.accept()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            print(f"[+] Bağlantı sağlandı: {addr}")
+            print(f"[+] Bağlandı: {addr}")
 
             while True:
                 if is_v_pressed():
@@ -173,18 +210,20 @@ def main():
                         if move_x != 0 or move_y != 0:
                             payload = f"MOUSE {move_x} {move_y}\n".encode('utf-8')
                             conn.sendall(payload)
-                            time.sleep(random.uniform(0.008, 0.010))
+                            
+                            # Değişken İnsansı Raporlama Sıklığı (Human Polling Fluctuations)
+                            time.sleep(random.uniform(0.006, 0.011))
                         else:
-                            time.sleep(0.004)
+                            time.sleep(0.003)
                     else:
                         engine.reset()
-                        time.sleep(0.004)
+                        time.sleep(0.003)
                 else:
                     engine.reset()
                     time.sleep(0.01)
 
         except (ConnectionResetError, BrokenPipeError, socket.error) as e:
-            print(f"[-] Bağlantı koptu ({e}). Yeniden bağlanması bekleniyor...")
+            print(f"[-] Bağlantı kesildi ({e}). Yeniden bekleniyor...")
             engine.reset()
             try:
                 conn.close()
@@ -194,7 +233,7 @@ def main():
             time.sleep(1)
             
         except KeyboardInterrupt:
-            print("\n[!] Kullanıcı tarafından kapatıldı.")
+            print("\n[!] Program durduruldu.")
             break
 
 if __name__ == "__main__":
