@@ -1,6 +1,0 @@
-mss
-opencv-python-headless
-numpy
-pywin32
-pyinstaller
-
