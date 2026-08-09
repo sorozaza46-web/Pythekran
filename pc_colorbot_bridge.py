@@ -8,25 +8,22 @@ import win32api
 from mss import mss
 
 # ==========================================
-# GELIŞMIŞ AYARLAR (ADVANCED CONFIG)
+# AYARLAR
 # ==========================================
 PORT = 9999                  # TCP Portu
-FOV_SIZE = 300               # Tarama alanı (300x300 piksel)
+FOV_SIZE = 350               # Tarama alanını biraz daha büyüttük (350x350)
 DEADZONE = 2                 # Hedeften kaç piksel kalana kadar hareket edilsin
-
 VK_V = 0x56                  # 'V' Tuşu Kodu
 
-# Mor / Magenta Renk Aralığı (HSV)
-LOWER_PURPLE = np.array([135, 110, 110])
-UPPER_PURPLE = np.array([165, 255, 255])
+# HER TÜRLÜ MOR / PEMBE / EFLATUN TONUNU YAKALAYAN GENİŞ HSV ARALIĞI
+LOWER_PURPLE = np.array([120, 40, 40])
+UPPER_PURPLE = np.array([170, 255, 255])
 
-# Hedef Ofseti (Kafaya kilitlenmek istenirse Y değerini eksi yapabilirsiniz, örn: -6)
-TARGET_OFFSET_Y = 0
+TARGET_OFFSET_Y = 0          # Hedef Ofseti (Kafa hizalaması gerekirse ayarlanır)
 
 # ==========================================
-# İNSANSI HAREKET MOTORU (HUMAN MOTION ENGINE)
+# İNSANSI HAREKET MOTORU
 # ==========================================
-
 class HumanMotionEngine:
     def __init__(self):
         self.is_overshooting = False
@@ -34,39 +31,30 @@ class HumanMotionEngine:
         self.overshoot_dy = 0
 
     def calculate_step(self, dx, dy, dist):
-        """Fitts Yasası, Gauss Titremesi ve Bilek Eğriliği ile adım hesabı yapar."""
-        
-        # 1. Dynamic Smoothing (Fitts Yasası İlhama Dayalı Yavaşlama)
         if dist > 120:
-            smooth = random.uniform(1.8, 2.2)  # Hızlı atış (Flick)
+            smooth = random.uniform(1.8, 2.2)
         elif dist > 40:
-            smooth = random.uniform(2.3, 3.2)  # Yaklaşma
+            smooth = random.uniform(2.3, 3.2)
         else:
-            smooth = random.uniform(3.3, 4.5)  # Hassas odaklanma
+            smooth = random.uniform(3.3, 4.5)
 
-        # 2. İvmeli (Ease-Out) Adım Hesabı
         step_x = dx / smooth
         step_y = dy / smooth
 
-        # 3. Bilek Dönme Kavis Sapması (Düz çizgi yerine doğal eğri çizer)
         if dist > 15:
-            # Vektöre dik açı yönünde küçük bir sapma ekler
             curve_factor = random.uniform(-0.12, 0.12)
             step_x += -dy * curve_factor / dist
             step_y +=  dx * curve_factor / dist
 
-        # 4. Fizyolojik El Titremesi (Gaussian Micro-Jitter)
         jitter_x = random.gauss(0, 0.35)
         jitter_y = random.gauss(0, 0.35)
 
         final_x = step_x + jitter_x
         final_y = step_y + jitter_y
 
-        # Tam sayıya yuvarlama
         int_x = int(round(final_x))
         int_y = int(round(final_y))
 
-        # Minimum 1 piksel hareket koruması
         if int_x == 0 and dx != 0:
             int_x = 1 if dx > 0 else -1
         if int_y == 0 and dy != 0:
@@ -75,16 +63,13 @@ class HumanMotionEngine:
         return int_x, int_y
 
     def check_overshoot(self, dx, dy, dist):
-        """Hızlı hareketlerde %12 ihtimalle hedefi hafifçe aşma simülasyonu."""
         if not self.is_overshooting and dist > 60 and random.random() < 0.12:
             self.is_overshooting = True
-            # Target'ı 2-5 piksel aşacak yönde ek kuvvet oluştur
             self.overshoot_dx = int((dx / dist) * random.randint(2, 5))
             self.overshoot_dy = int((dy / dist) * random.randint(2, 5))
             return self.overshoot_dx, self.overshoot_dy
         
         if self.is_overshooting:
-            # Aşılan mesafeyi geri düzelt
             corr_x = -self.overshoot_dx
             corr_y = -self.overshoot_dy
             self.is_overshooting = False
@@ -95,7 +80,6 @@ class HumanMotionEngine:
 # ==========================================
 # ANA SİSTEM
 # ==========================================
-
 def get_screen_roi(sct, roi_box):
     sct_img = sct.grab(roi_box)
     img = np.array(sct_img)
@@ -120,7 +104,7 @@ def find_target_offset(img, center_x, center_y):
     best_target = None
 
     for contour in contours:
-        if cv2.contourArea(contour) < 8:
+        if cv2.contourArea(contour) < 5: # Toleransı artırmak için alanı 5'e düşürdük
             continue
             
         M = cv2.moments(contour)
@@ -148,12 +132,12 @@ def main():
     server_socket.bind(('0.0.0.0', PORT))
     server_socket.listen(1)
     
-    print(f"[+] TCP Sunucu {PORT} portunda dinleniyor...")
-    print("[+] Telefonda IP/Port girip bağlanın.")
+    print(f"[+] TCP Sunucu {PORT} portunda hazır.")
+    print("[+] Telefonda IP/Port girip bağlanın...")
     
     conn, addr = server_socket.accept()
-    print(f"[+] Telefon bağlandı: {addr}")
-    print("[+] 'V' tuşuna basılı tutulduğunda gelişmiş insansı mod aktifleşir.")
+    print(f"\n[SUCCESS] Telefon başarıyla bağlandı: {addr}")
+    print("[+] Test etmek için ekranda mor bir renk açın ve 'V' tuşuna basılı tutun.\n")
 
     sct = mss()
     monitor = sct.monitors[1]
@@ -172,14 +156,15 @@ def main():
     roi_center_y = FOV_SIZE // 2
 
     was_v_pressed_last_frame = False
+    last_print_time = 0
 
     try:
         while True:
             v_pressed = is_v_pressed()
 
-            # V tuşuna ilk basıldığı an insan tepki süresini (Reaction Lag) simüle et
             if v_pressed and not was_v_pressed_last_frame:
-                time.sleep(random.uniform(0.012, 0.028)) # 12-28 ms mikro tepki gecikmesi
+                print("[!] 'V' tuşuna basıldı, ekran taranıyor...")
+                time.sleep(random.uniform(0.012, 0.028))
 
             was_v_pressed_last_frame = v_pressed
 
@@ -190,28 +175,32 @@ def main():
                 if raw_dx is not None and raw_dy is not None:
                     dist = math.hypot(raw_dx, raw_dy)
                     
-                    # Deadzone kontrolü
                     if abs(raw_dx) <= DEADZONE: raw_dx = 0
                     if abs(raw_dy) <= DEADZONE: raw_dy = 0
                         
                     if raw_dx != 0 or raw_dy != 0:
-                        # 1. Overshoot (Aşma) Kontrolü
                         ov_x, ov_y = motion_engine.check_overshoot(raw_dx, raw_dy, dist)
                         target_dx = raw_dx + ov_x
                         target_dy = raw_dy + ov_y
 
-                        # 2. İnsansı Adım Hesabı (Fitts + Jitter + Curve)
                         move_x, move_y = motion_engine.calculate_step(target_dx, target_dy, dist)
 
-                        # 3. Paket Gönderimi (TCP üzerinden Telefona)
                         payload = f"MOUSE {move_x} {move_y}\n"
                         conn.sendall(payload.encode('utf-8'))
+                        
+                        # Konsolu doldurmamak için saniyede birkaç kez log basar
+                        if time.time() - last_print_time > 0.2:
+                            print(f"[->] Mor renk algılandı! Gönderilen paket: MOUSE {move_x} {move_y}")
+                            last_print_time = time.time()
+                else:
+                    if time.time() - last_print_time > 0.5:
+                        print("[-] 'V' basılı ama taranan 350x350 alanda mor renk yok.")
+                        last_print_time = time.time()
 
-            # İnsansı döngü zamanlaması dalgalanması
             time.sleep(random.uniform(0.0015, 0.0035))
 
     except (ConnectionResetError, BrokenPipeError):
-        print("[-] Telefon bağlantısı koptu.")
+        print("\n[-] Telefon bağlantısı koptu.")
     except KeyboardInterrupt:
         print("\n[!] Kapatılıyor.")
     finally:
