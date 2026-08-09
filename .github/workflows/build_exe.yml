@@ -27,7 +27,7 @@ jobs:
 
       - name: PyInstaller ile EXE Oluştur
         run: |
-          pyinstaller --onefile pc_colorbot_bridge.py
+          pyinstaller --onefile --noconsole pc_colorbot_bridge.py
 
       - name: EXE Dosyasını Artifact Yaparak Yükle
         uses: actions/upload-artifact@v4
