@@ -1,4 +1,4 @@
-Name: Build Windows EXE (PyInstaller)
+name: Build Windows EXE (PyInstaller)
 
 on:
   push:
