@@ -5,7 +5,7 @@ import random
 import cv2
 import numpy as np
 import win32api
-from mss import mss
+import dxcam  # GDI yerine GPU Direct Frame Capture (DXGI)
 
 # ==========================================
 # SİSTEM VE AĞ AYARLARI
@@ -17,7 +17,7 @@ DEADZONE = 2                 # Kilitlenme toleransı (Piksel)
 # ==========================================
 # İNSANSI GELİŞMİŞ AYARLAR
 # ==========================================
-BASE_KP = 0.12               # Temel takip hızı (Daha doğal geçiş için hafif düşürüldü)
+BASE_KP = 0.12               # Temel takip hızı
 SMOOTH_FACTOR = 0.68         # Yumuşatma çarpanı
 MAX_STEP = 5.5               # Ani sıçramaları önleyen maksimum adım sınırı
 
@@ -54,14 +54,13 @@ class ProHumanMouseEngine:
             self.reset()
             return 0, 0
 
-        # 1. İnsansı İnsan Reaksiyon Gecikmesi (Kas İrkilmesi / Muscle Latency)
-        # Hedef ilk tespit edildiğinde 1-2 döngü çok hafif tepkisizlik simüle edilir
+        # Kas İrkilmesi / İnsansı Algılama Gecikmesi
         if self.curr_vx == 0 and self.curr_vy == 0:
             if self.reaction_delay_counter < random.randint(1, 2):
                 self.reaction_delay_counter += 1
                 return 0, 0
 
-        # 2. Dinamik Fitts Yasası & S-Curve Hız Profili
+        # Dinamik Fitts Yasası & S-Curve Hız Profili
         if dist > 45:
             kp = BASE_KP * 1.20
             smooth = SMOOTH_FACTOR * 0.70
@@ -70,33 +69,29 @@ class ProHumanMouseEngine:
             smooth = SMOOTH_FACTOR
         else:
             kp = BASE_KP * 0.55
-            smooth = SMOOTH_FACTOR * 1.30  # Yakın mesafe mikro düzeltme yumuşaklığı
+            smooth = SMOOTH_FACTOR * 1.30
 
         target_vx = raw_dx * kp
         target_vy = raw_dy * kp
 
-        # 3. Asimetrik Eksensel Kavis & Bezier Eğrisi Simülasyonu
-        # İnsan eli X (yatay) ve Y (dikey) ekseninde aynı ivmeyle hareket edemez.
+        # Asimetrik Kavis & Bezier Eğrisi
         curve_factor_x = random.uniform(0.88, 1.12)
         curve_factor_y = random.uniform(0.94, 1.06)
 
         self.curr_vx = (self.curr_vx * smooth) + (target_vx * (1.0 - smooth)) * curve_factor_x
         self.curr_vy = (self.curr_vy * smooth) + (target_vy * (1.0 - smooth)) * curve_factor_y
 
-        # 4. Overshoot / Hedefi Geçip Düzeltme (Hızlı Sıçramalarda)
-        # Mesafe yüksekse %15 ihtimalle hedef biraz aşılır ve geri toplanır.
+        # Overshoot (Taşma ve Düzeltme)
         if dist > 30 and random.random() < 0.15:
             self.curr_vx *= 1.08
             self.curr_vy *= 1.08
 
-        # 5. Biyometrik Mikro Titreme (Physiological Jitter)
+        # Biyometrik Mikro Titreme
         if dist > 5 and random.random() < 0.25:
-            jitter_x = random.uniform(-0.35, 0.35)
-            jitter_y = random.uniform(-0.35, 0.35)
-            self.curr_vx += jitter_x
-            self.curr_vy += jitter_y
+            self.curr_vx += random.uniform(-0.35, 0.35)
+            self.curr_vy += random.uniform(-0.35, 0.35)
 
-        # 6. Dinamik Hız Sınırlama (Frenleme)
+        # Dinamik Hız Sınırlama
         limit = MAX_STEP
         if dist < 6:
             limit = 1.3
@@ -106,7 +101,7 @@ class ProHumanMouseEngine:
         scaled_vx = np.clip(self.curr_vx, -limit, limit)
         scaled_vy = np.clip(self.curr_vy, -limit, limit)
 
-        # 7. Sub-pixel Akümülatörü (Ondalık Hassasiyet Belleği)
+        # Sub-pixel Akümülatörü
         total_x = scaled_vx + self.remainder_x
         total_y = scaled_vy + self.remainder_y
 
@@ -116,19 +111,13 @@ class ProHumanMouseEngine:
         self.remainder_x = total_x - move_x
         self.remainder_y = total_y - move_y
 
-        # Minimum Adım Düzeltmesi (Ölü noktaları aşma)
+        # Minimum Adım Düzeltmesi
         if move_x == 0 and raw_dx != 0 and abs(raw_dx) > DEADZONE:
             move_x = 1 if raw_dx > 0 else -1
         if move_y == 0 and raw_dy != 0 and abs(raw_dy) > DEADZONE:
             move_y = 1 if raw_dy > 0 else -1
 
         return move_x, move_y
-
-
-def get_screen_roi(sct, roi_box):
-    sct_img = sct.grab(roi_box)
-    img = np.array(sct_img)
-    return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
 
 def is_v_pressed():
@@ -140,7 +129,7 @@ def find_best_target(img, center_x, center_y):
     mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
     
     h_roi, w_roi = mask.shape
-    # Alt kısmı daha agresif keserek odağı kafa ve boyun bölgesine topluyoruz
+    # Alt %38'lik kısmı maskeleyerek odağı kafa bölgesinde tutuyoruz
     mask[int(h_roi * 0.62):, :] = 0  
 
     kernel = np.ones((3, 3), np.uint8)
@@ -169,11 +158,8 @@ def find_best_target(img, center_x, center_y):
         if M["m00"] != 0:
             cx = int(M["m10"] / M["m00"])
             
-            # --- YUKARI HİZALAMA VE İNSANSI RASTGELELİK ---
-            # h * 0.36 oranı ile hedef tam kafa hizasına taşındı.
+            # Kafa hizası + Gauss Mikro Sapması
             head_offset = int(h * 0.36) if h > 20 else int(h * 0.24)
-            
-            # Sabit nokta kilitlenmesini bozmak için Gauss dağılımlı mikro sapma
             head_offset += int(np.random.normal(0, 0.8))  
             
             cy = int(M["m01"] / M["m00"]) - head_offset
@@ -192,23 +178,34 @@ def find_best_target(img, center_x, center_y):
 
 
 def main():
-    sct = mss()
-    monitor = sct.monitors[1]
+    # ==========================================
+    # DXGI / GPU DIRECT MEMORY CAPTURE KURULUMU
+    # ==========================================
+    # DXCAM kullanarak ekran kartının VRAM arabelleğinden doğrudan kare alınır.
+    # GDI Hooking izlemelerinden tamamen kaçınılmış olur.
+    camera = dxcam.create(output_idx=0, output_color="BGR")
     
-    screen_center_x = monitor["width"] // 2
-    screen_center_y = monitor["height"] // 2
+    screen_width, screen_height = camera.width, camera.height
+    screen_center_x = screen_width // 2
+    screen_center_y = screen_height // 2
+
+    # Sadece hedeflenen bölgenin (ROI) koordinatları
+    left = screen_center_x - (FOV_SIZE // 2)
+    top = screen_center_y - (FOV_SIZE // 2) - 10
+    right = left + FOV_SIZE
+    bottom = top + FOV_SIZE
+
+    region = (left, top, right, bottom)
     
-    roi_box = {
-        "top": screen_center_y - (FOV_SIZE // 2) - 10,
-        "left": screen_center_x - (FOV_SIZE // 2),
-        "width": FOV_SIZE,
-        "height": FOV_SIZE
-    }
-    
+    # GPU Üzerinde Arabelleğe Alma (Direct Capture Mode)
+    camera.start(region=region, target_fps=144, video_mode=True)
+
     roi_center_x = FOV_SIZE // 2
     roi_center_y = (FOV_SIZE // 2) - 10
 
     engine = ProHumanMouseEngine()
+
+    print("[+] GPU DXGI Capture Engine Başlatıldı.")
 
     while True:
         try:
@@ -225,28 +222,31 @@ def main():
 
             while True:
                 if is_v_pressed():
-                    frame = get_screen_roi(sct, roi_box)
-                    raw_dx, raw_dy = find_best_target(frame, roi_center_x, roi_center_y)
+                    # Doğrudan VRAM'deki en son kareyi sıfır CPU yükü ile alıyoruz
+                    frame = camera.get_latest_frame()
                     
-                    if raw_dx is not None and raw_dy is not None:
-                        move_x, move_y = engine.calculate_step(raw_dx, raw_dy)
+                    if frame is not None:
+                        raw_dx, raw_dy = find_best_target(frame, roi_center_x, roi_center_y)
+                        
+                        if raw_dx is not None and raw_dy is not None:
+                            move_x, move_y = engine.calculate_step(raw_dx, raw_dy)
 
-                        if move_x != 0 or move_y != 0:
-                            payload = f"MOUSE {move_x} {move_y}\n".encode('utf-8')
-                            conn.sendall(payload)
-                            
-                            # İnsansı Zamanlama Dalgalanması (Variable Polling Frequency)
-                            # Sabit gecikmeler yerine insan el kaslarının tutarsızlığı simüle edilir.
-                            base_sleep = random.uniform(0.005, 0.010)
-                            if random.random() < 0.08:  # %8 ihtimalle anlık insansı duraklama (micro-pause)
-                                base_sleep += random.uniform(0.003, 0.007)
+                            if move_x != 0 or move_y != 0:
+                                payload = f"MOUSE {move_x} {move_y}\n".encode('utf-8')
+                                conn.sendall(payload)
                                 
-                            time.sleep(base_sleep)
+                                base_sleep = random.uniform(0.005, 0.010)
+                                if random.random() < 0.08:
+                                    base_sleep += random.uniform(0.003, 0.007)
+                                    
+                                time.sleep(base_sleep)
+                            else:
+                                time.sleep(0.003)
                         else:
+                            engine.reset()
                             time.sleep(0.003)
                     else:
-                        engine.reset()
-                        time.sleep(0.003)
+                        time.sleep(0.001)
                 else:
                     engine.reset()
                     time.sleep(0.01)
@@ -263,6 +263,7 @@ def main():
             
         except KeyboardInterrupt:
             print("\n[!] Program durduruldu.")
+            camera.stop()
             break
 
 if __name__ == "__main__":
