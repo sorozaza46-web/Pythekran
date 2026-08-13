@@ -5,7 +5,7 @@ import random
 import cv2
 import numpy as np
 import win32api
-import dxcam  # GDI yerine GPU Direct Frame Capture (DXGI)
+import dxcam  # GPU Direct Frame Capture (DXGI)
 
 # ==========================================
 # SİSTEM VE AĞ AYARLARI
@@ -21,13 +21,21 @@ BASE_KP = 0.12               # Temel takip hızı
 SMOOTH_FACTOR = 0.68         # Yumuşatma çarpanı
 MAX_STEP = 5.5               # Ani sıçramaları önleyen maksimum adım sınırı
 
-VK_V = 0x56                  # 'V' Tuşu Kodu
+# ==========================================
+# TUŞ KODLARI
+# ==========================================
+VK_V = 0x56                  # 'V' Tuşu (Aç / Kapat Anahtarı)
+VK_LBUTTON = 0x01            # Sol Fare Tıkı (Tetikleyici)
 
 # ==========================================
 # MOR RENK ARALIĞI
 # ==========================================
 LOWER_PURPLE = np.array([135, 80, 100], dtype=np.uint8)
 UPPER_PURPLE = np.array([165, 255, 255], dtype=np.uint8)
+
+# Global Durum Değişkeni
+system_enabled = False
+last_v_state = False
 
 # ==========================================
 # PRO HUMAN MOUSE ENGINE (ADVANCED BIOMECHANICS)
@@ -54,7 +62,7 @@ class ProHumanMouseEngine:
             self.reset()
             return 0, 0
 
-        # Kas İrkilmesi / İnsansı Algılama Gecikmesi
+        # Kas İrkilmesi / Algılama Gecikmesi
         if self.curr_vx == 0 and self.curr_vy == 0:
             if self.reaction_delay_counter < random.randint(1, 2):
                 self.reaction_delay_counter += 1
@@ -120,8 +128,27 @@ class ProHumanMouseEngine:
         return move_x, move_y
 
 
-def is_v_pressed():
-    return (win32api.GetAsyncKeyState(VK_V) & 0x8000) != 0
+def check_toggle_keys():
+    """
+    V tuşuna basılıp bırakıldığında (edge trigger) sistem durumunu değiştirir.
+    Sol tıkın basılı olup olmadığını kontrol eder.
+    """
+    global system_enabled, last_v_state
+    
+    current_v_state = (win32api.GetAsyncKeyState(VK_V) & 0x8000) != 0
+    
+    # 'V' tuşuna yeni basıldığında durumu değiştir (Toggle)
+    if current_v_state and not last_v_state:
+        system_enabled = not system_enabled
+        status_str = "AKTİF" if system_enabled else "PASİF"
+        print(f"[!] Sistem Durumu: {status_str}")
+        
+    last_v_state = current_v_state
+
+    # Sol Tık Basılı mı?
+    is_left_click_pressed = (win32api.GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0
+
+    return system_enabled and is_left_click_pressed
 
 
 def find_best_target(img, center_x, center_y):
@@ -129,7 +156,6 @@ def find_best_target(img, center_x, center_y):
     mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
     
     h_roi, w_roi = mask.shape
-    # Alt %38'lik kısmı maskeleyerek odağı kafa bölgesinde tutuyoruz
     mask[int(h_roi * 0.62):, :] = 0  
 
     kernel = np.ones((3, 3), np.uint8)
@@ -158,7 +184,6 @@ def find_best_target(img, center_x, center_y):
         if M["m00"] != 0:
             cx = int(M["m10"] / M["m00"])
             
-            # Kafa hizası + Gauss Mikro Sapması
             head_offset = int(h * 0.36) if h > 20 else int(h * 0.24)
             head_offset += int(np.random.normal(0, 0.8))  
             
@@ -178,26 +203,18 @@ def find_best_target(img, center_x, center_y):
 
 
 def main():
-    # ==========================================
-    # DXGI / GPU DIRECT MEMORY CAPTURE KURULUMU
-    # ==========================================
-    # DXCAM kullanarak ekran kartının VRAM arabelleğinden doğrudan kare alınır.
-    # GDI Hooking izlemelerinden tamamen kaçınılmış olur.
     camera = dxcam.create(output_idx=0, output_color="BGR")
     
     screen_width, screen_height = camera.width, camera.height
     screen_center_x = screen_width // 2
     screen_center_y = screen_height // 2
 
-    # Sadece hedeflenen bölgenin (ROI) koordinatları
     left = screen_center_x - (FOV_SIZE // 2)
     top = screen_center_y - (FOV_SIZE // 2) - 10
     right = left + FOV_SIZE
     bottom = top + FOV_SIZE
 
     region = (left, top, right, bottom)
-    
-    # GPU Üzerinde Arabelleğe Alma (Direct Capture Mode)
     camera.start(region=region, target_fps=144, video_mode=True)
 
     roi_center_x = FOV_SIZE // 2
@@ -206,6 +223,7 @@ def main():
     engine = ProHumanMouseEngine()
 
     print("[+] GPU DXGI Capture Engine Başlatıldı.")
+    print("[+] 'V' Tuşu: Aç / Kapat | Sol Tık: Takip Et")
 
     while True:
         try:
@@ -221,8 +239,10 @@ def main():
             print(f"[+] Bağlandı: {addr}")
 
             while True:
-                if is_v_pressed():
-                    # Doğrudan VRAM'deki en son kareyi sıfır CPU yükü ile alıyoruz
+                # V ile sistem açık mı VE sol tık basılı mı?
+                should_aim = check_toggle_keys()
+
+                if should_aim:
                     frame = camera.get_latest_frame()
                     
                     if frame is not None:
@@ -249,7 +269,7 @@ def main():
                         time.sleep(0.001)
                 else:
                     engine.reset()
-                    time.sleep(0.01)
+                    time.sleep(0.005)
 
         except (ConnectionResetError, BrokenPipeError, socket.error) as e:
             print(f"[-] Bağlantı kesildi ({e}). Yeniden bekleniyor...")
@@ -268,4 +288,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+                            
