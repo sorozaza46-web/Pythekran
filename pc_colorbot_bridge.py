@@ -11,29 +11,29 @@ import dxcam  # GPU Direct Frame Capture (DXGI)
 # SİSTEM VE AĞ AYARLARI
 # ==========================================
 PORT = 9999                  # TCP Portu
-FOV_SIZE = 130               # Odak alanı genişliği
-DEADZONE = 2                 # Kilitlenme toleransı (Piksel)
+FOV_SIZE = 140               # Odak alanı genişliği
+DEADZONE = 1                 # Hassasiyet artırıldı (1 Piksel)
 
 # ==========================================
 # İNSANSI GELİŞMİŞ AYARLAR
 # ==========================================
-BASE_KP = 0.12               # Temel takip hızı
-SMOOTH_FACTOR = 0.68         # Yumuşatma çarpanı
-MAX_STEP = 5.5               # Ani sıçramaları önleyen maksimum adım sınırı
+BASE_KP = 0.13               # Temel takip hızı
+SMOOTH_FACTOR = 0.65         # Yumuşatma çarpanı
+MAX_STEP = 6.0               # Maksimum adım sınırı
 
 # ==========================================
 # TUŞ KODLARI
 # ==========================================
-VK_V = 0x56                  # 'V' Tuşu (Aç / Kapat Anahtarı)
-VK_LBUTTON = 0x01            # Sol Fare Tıkı (Tetikleyici)
+VK_V = 0x56                  # 'V' Tuşu (Ana Aç / Kapat Anahtarı)
+VK_LBUTTON = 0x01            # Sol Fare Tıkı (Anlık Basılı Tutma Tetiği)
 
 # ==========================================
 # MOR RENK ARALIĞI
 # ==========================================
-LOWER_PURPLE = np.array([135, 80, 100], dtype=np.uint8)
+LOWER_PURPLE = np.array([135, 75, 90], dtype=np.uint8)  # Uzaktaki soluk pikseller için tolerans genişletildi
 UPPER_PURPLE = np.array([165, 255, 255], dtype=np.uint8)
 
-# Global Durum Değişkeni
+# Global Durum Değişkenleri
 system_enabled = False
 last_v_state = False
 
@@ -68,43 +68,45 @@ class ProHumanMouseEngine:
                 self.reaction_delay_counter += 1
                 return 0, 0
 
-        # Dinamik Fitts Yasası & S-Curve Hız Profili
-        if dist > 45:
-            kp = BASE_KP * 1.20
-            smooth = SMOOTH_FACTOR * 0.70
-        elif dist > 18:
-            kp = BASE_KP
+        # Uzaktaki Hedefler İçin Dinamik Hız Tespiti
+        dyn_kp = BASE_KP * random.uniform(0.96, 1.04)
+        
+        if dist > 40:
+            kp = dyn_kp * 1.35   # Uzak hedeflerde hızlı yanıt
+            smooth = SMOOTH_FACTOR * 0.65
+        elif dist > 15:
+            kp = dyn_kp
             smooth = SMOOTH_FACTOR
         else:
-            kp = BASE_KP * 0.55
-            smooth = SMOOTH_FACTOR * 1.30
+            kp = dyn_kp * 0.60
+            smooth = SMOOTH_FACTOR * 1.25
 
         target_vx = raw_dx * kp
         target_vy = raw_dy * kp
 
         # Asimetrik Kavis & Bezier Eğrisi
-        curve_factor_x = random.uniform(0.88, 1.12)
-        curve_factor_y = random.uniform(0.94, 1.06)
+        curve_factor_x = random.uniform(0.89, 1.11)
+        curve_factor_y = random.uniform(0.95, 1.05)
 
         self.curr_vx = (self.curr_vx * smooth) + (target_vx * (1.0 - smooth)) * curve_factor_x
         self.curr_vy = (self.curr_vy * smooth) + (target_vy * (1.0 - smooth)) * curve_factor_y
 
         # Overshoot (Taşma ve Düzeltme)
-        if dist > 30 and random.random() < 0.15:
-            self.curr_vx *= 1.08
-            self.curr_vy *= 1.08
+        if dist > 25 and random.random() < 0.15:
+            self.curr_vx *= 1.07
+            self.curr_vy *= 1.07
 
         # Biyometrik Mikro Titreme
-        if dist > 5 and random.random() < 0.25:
-            self.curr_vx += random.uniform(-0.35, 0.35)
-            self.curr_vy += random.uniform(-0.35, 0.35)
+        if dist > 4 and random.random() < 0.22:
+            self.curr_vx += random.uniform(-0.30, 0.30)
+            self.curr_vy += random.uniform(-0.30, 0.30)
 
         # Dinamik Hız Sınırlama
         limit = MAX_STEP
-        if dist < 6:
-            limit = 1.3
-        elif dist < 15:
-            limit = 2.4
+        if dist < 5:
+            limit = 1.2
+        elif dist < 12:
+            limit = 2.2
 
         scaled_vx = np.clip(self.curr_vx, -limit, limit)
         scaled_vy = np.clip(self.curr_vy, -limit, limit)
@@ -119,7 +121,7 @@ class ProHumanMouseEngine:
         self.remainder_x = total_x - move_x
         self.remainder_y = total_y - move_y
 
-        # Minimum Adım Düzeltmesi
+        # Uzaktaki 1-2 piksellik hassas kaymaları atlamamak için min adımlama
         if move_x == 0 and raw_dx != 0 and abs(raw_dx) > DEADZONE:
             move_x = 1 if raw_dx > 0 else -1
         if move_y == 0 and raw_dy != 0 and abs(raw_dy) > DEADZONE:
@@ -130,14 +132,14 @@ class ProHumanMouseEngine:
 
 def check_toggle_keys():
     """
-    V tuşuna basılıp bırakıldığında (edge trigger) sistem durumunu değiştirir.
-    Sol tıkın basılı olup olmadığını kontrol eder.
+    'V' Tuşu: Genel Sistem Durumu (Aç / Kapat Toggle)
+    Sol Tık: Parmağın sol tıka basılı tutulduğu anlarda takip yapar, 
+             bırakıldığı salisede takibi ve odaklanmayı durdurur.
     """
     global system_enabled, last_v_state
     
     current_v_state = (win32api.GetAsyncKeyState(VK_V) & 0x8000) != 0
     
-    # 'V' tuşuna yeni basıldığında durumu değiştir (Toggle)
     if current_v_state and not last_v_state:
         system_enabled = not system_enabled
         status_str = "AKTİF" if system_enabled else "PASİF"
@@ -145,10 +147,10 @@ def check_toggle_keys():
         
     last_v_state = current_v_state
 
-    # Sol Tık Basılı mı?
-    is_left_click_pressed = (win32api.GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0
+    # Sol Tıkın Anlık Basılma Durumu
+    is_lbutton_down = (win32api.GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0
 
-    return system_enabled and is_left_click_pressed
+    return system_enabled and is_lbutton_down
 
 
 def find_best_target(img, center_x, center_y):
@@ -156,11 +158,10 @@ def find_best_target(img, center_x, center_y):
     mask = cv2.inRange(hsv, LOWER_PURPLE, UPPER_PURPLE)
     
     h_roi, w_roi = mask.shape
-    mask[int(h_roi * 0.62):, :] = 0  
+    mask[int(h_roi * 0.68):, :] = 0  
 
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.dilate(mask, kernel, iterations=1)
     
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -172,21 +173,30 @@ def find_best_target(img, center_x, center_y):
 
     for contour in contours:
         area = cv2.contourArea(contour)
-        if area < 20 or area > 2200:
+        
+        # UZAK HEDEF DÜZELTMESİ:
+        # Minimum alan threshold'u 6'ya düşürüldü. Uzaktaki pikseller elenmiyor.
+        if area < 6 or area > 3000:
             continue
             
         x, y, w, h = cv2.boundingRect(contour)
         aspect_ratio = float(h) / float(w) if w > 0 else 0
-        if aspect_ratio < 0.5:
+        if aspect_ratio < 0.35:
             continue
 
         M = cv2.moments(contour)
         if M["m00"] != 0:
             cx = int(M["m10"] / M["m00"])
             
-            head_offset = int(h * 0.36) if h > 20 else int(h * 0.24)
-            head_offset += int(np.random.normal(0, 0.8))  
-            
+            # Mesafeye/Boyuta Göre Dinamik Kafa Hizalaması
+            if h > 25:
+                head_offset = int(h * 0.36)
+            elif h > 10:
+                head_offset = int(h * 0.30)
+            else:
+                head_offset = int(h * 0.22)
+                
+            head_offset += int(np.random.normal(0, 0.7))  
             cy = int(M["m01"] / M["m00"]) - head_offset
             
             dist = (cx - center_x) ** 2 + (cy - center_y) ** 2
@@ -223,7 +233,8 @@ def main():
     engine = ProHumanMouseEngine()
 
     print("[+] GPU DXGI Capture Engine Başlatıldı.")
-    print("[+] 'V' Tuşu: Aç / Kapat | Sol Tık: Takip Et")
+    print("[+] 'V' Tuşu: Ana Aç / Kapat")
+    print("[+] Sol Tık: Basılı Tutulduğunda Takip Et / Bırakıldığında Anında Dur")
 
     while True:
         try:
@@ -239,10 +250,10 @@ def main():
             print(f"[+] Bağlandı: {addr}")
 
             while True:
-                # V ile sistem açık mı VE sol tık basılı mı?
                 should_aim = check_toggle_keys()
 
                 if should_aim:
+                    # Sol tık basılı olduğu sürece odaklanır ve kilitlenir
                     frame = camera.get_latest_frame()
                     
                     if frame is not None:
@@ -255,19 +266,19 @@ def main():
                                 payload = f"MOUSE {move_x} {move_y}\n".encode('utf-8')
                                 conn.sendall(payload)
                                 
-                                base_sleep = random.uniform(0.005, 0.010)
+                                base_sleep = random.uniform(0.005, 0.009)
                                 if random.random() < 0.08:
-                                    base_sleep += random.uniform(0.003, 0.007)
+                                    base_sleep += random.uniform(0.003, 0.006)
                                     
                                 time.sleep(base_sleep)
                             else:
                                 time.sleep(0.003)
                         else:
-                            engine.reset()
                             time.sleep(0.003)
                     else:
                         time.sleep(0.001)
                 else:
+                    # Sol tık bırakıldığı AN hareketi ve motor ivmesini durdurur
                     engine.reset()
                     time.sleep(0.005)
 
@@ -288,4 +299,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                            
+            
